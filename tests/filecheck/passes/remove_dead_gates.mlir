@@ -1,4 +1,4 @@
-// RUN: deltakit_compile compile-passes %s -t -p canonicalize -O %t && filecheck %s --input-file %t
+// RUN: deltakit_compile compile-passes %s -t -p remove-dead-gates -O %t && filecheck %s --input-file %t
 
 builtin.module {
 // CHECK:       builtin.module {
