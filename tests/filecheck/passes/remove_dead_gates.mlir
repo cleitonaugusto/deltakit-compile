@@ -20,6 +20,8 @@ builtin.module {
 // CHECK-NEXT:          qref.reset<Z> (%q1)
 
 // Not removed: %q2 is used by a two-qubit gate between the gate and the reset.
+// The cx itself also stays, and now it is the subset test alone that keeps it:
+// it touches %q1, which this reset does not clean.
         qref.gate<#qcore.gate.h> (%q2)
         qref.gate<#qcore.gate.cx> (%q1, %q2)
         qref.reset<Z> (%q2)
@@ -27,14 +29,12 @@ builtin.module {
 // CHECK-NEXT:          qref.gate<#qcore.gate.cx> (%q1, %q2)
 // CHECK-NEXT:          qref.reset<Z> (%q2)
 
-// Not removed, by choice rather than by necessity: a two-qubit gate whose
-// qubits are all reset straight after is in fact dead, but this pattern only
-// removes single-qubit gates, so that each removal is a decision about one
-// qubit. Lifting that is follow-up work, and this case pins the current
-// behaviour so the restriction cannot be dropped by accident.
+// Removed: a two-qubit gate with both of its qubits reset straight after and
+// nothing in between touching either. Arity does not enter into it. A gate
+// affects nothing beyond its own operands, so once every one of them is about
+// to be reset there is no way to tell the gate ran.
         qref.gate<#qcore.gate.cx> (%q1, %q2)
         qref.reset<Z> (%q1, %q2)
-// CHECK-NEXT:          qref.gate<#qcore.gate.cx> (%q1, %q2)
 // CHECK-NEXT:          qref.reset<Z> (%q1, %q2)
 
 // Not removed: the gate covers a qubit that is not being reset. Removing it as

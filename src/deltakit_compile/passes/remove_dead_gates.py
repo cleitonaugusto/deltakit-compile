@@ -17,26 +17,27 @@ from deltakit_compile.dialects.qref import GateOp, ResetOp
 
 
 class _DeadGateBeforeResetPattern(RewritePattern):
-    """Removes single-qubit gates whose only effect is undone by an immediately following reset.
+    """Removes gates whose only effect is undone by an immediately following reset.
 
     The compiler lowers a measurement in a non-computational basis into a basis change, the
     measurement, and a basis change back. That trailing basis change is dead whenever the qubit is
     reset before anything else touches it, which is the common case in a syndrome extraction round.
 
     Only gates whose qubits are *all* being reset are removed, and only when nothing between the
-    gate and the reset uses those qubits. Detectors and observables refer to measurement records
-    rather than qubits, so they do not count as a use and do not block the removal.
+    gate and the reset uses those qubits. That subset test is what makes the arity irrelevant: a
+    gate acts on nothing beyond its own operands, so a two-qubit gate with both operands reset and
+    untouched in between is as dead as a basis change. Detectors and observables refer to
+    measurement records rather than qubits, so they do not count as a use and do not block the
+    removal.
 
-    Broadcast gates are removed as a unit or not at all: a gate covering both reset and non-reset
-    qubits is left alone rather than split, which keeps this pattern to a single decision.
+    Gates are removed as a unit or not at all: one covering both reset and non-reset qubits fails
+    the subset test and is left alone rather than split.
     """
 
     @override
     @op_type_rewrite_pattern
     def match_and_rewrite(self, op: ResetOp, rewriter: PatternRewriter) -> None:
-        clean = {qubit for group in op.qubit_operand_groups for qubit in group}
-        if not clean:
-            return
+        clean = set(op.qubits)
 
         previous = op.prev_op
         while previous is not None and clean:
@@ -57,12 +58,7 @@ class _DeadGateBeforeResetPattern(RewritePattern):
                 if isinstance(operand.type, qcore.QubitType)
             }
 
-            if (
-                isinstance(previous, GateOp)
-                and touched
-                and touched <= clean
-                and all(len(group) == 1 for group in previous.qubit_operand_groups)
-            ):
+            if isinstance(previous, GateOp) and touched and touched <= clean:
                 rewriter.erase_op(previous)
                 return
 
@@ -73,7 +69,7 @@ class _DeadGateBeforeResetPattern(RewritePattern):
 class RemoveDeadGates(ModulePass):
     """Remove gates whose effect no later operation in the circuit can observe.
 
-    Currently one pattern: a single-qubit gate immediately before a reset of the same qubit. The
+    Currently one pattern: a gate immediately before a reset of every qubit it touches. The
     intent is that further cases, such as gates on qubits that are never measured, become patterns
     in this pass rather than separate ones.
 
@@ -91,9 +87,8 @@ class RemoveDeadGates(ModulePass):
     @override
     def apply(self, ctx: Context, op: ModuleOp) -> None:
         # Recursive because erasing a gate can expose the one behind it: a body ending in two dead
-        # basis changes needs a second look at the same reset. The canonicalisation driver this
-        # pattern used to run under iterated to a fixpoint, and the behaviour is kept. Each
-        # application erases an op, so the walk terminates.
+        # basis changes needs a second look at the same reset. Each application erases an op, so
+        # the walk terminates.
         PatternRewriteWalker(
             _DeadGateBeforeResetPattern(),
             apply_recursively=True,
