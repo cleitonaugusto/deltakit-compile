@@ -4,7 +4,7 @@
 from typing_extensions import override
 from xdsl.context import Context
 from xdsl.dialects.builtin import ModuleOp
-from xdsl.ir import Block
+from xdsl.ir import BlockArgument, SSAValue
 from xdsl.passes import ModulePass
 from xdsl.pattern_rewriter import (
     PatternRewriter,
@@ -15,6 +15,7 @@ from xdsl.pattern_rewriter import (
 from xdsl.rewriter import InsertPoint
 
 from deltakit_compile.dialects import qcore
+from deltakit_compile.dialects import stabiliser as stab
 from deltakit_compile.dialects.qref import GateOp
 from deltakit_compile.dialects.qstruct import RepeatOp
 
@@ -57,6 +58,10 @@ class _RotateTrailingGatePattern(RewritePattern):
 
     The two copies left outside the loop are dead in the same sense but are not removed here, since
     that needs a pattern that looks across the loop boundary.
+
+    When the gate acts on a qubit the loop carries as a block argument, the copies use the matching
+    iter arg and result instead, which name the same qubit outside the body. A gate acting on a
+    value produced inside the body cannot be lifted out and is left where it is.
     """
 
     @override
@@ -72,25 +77,42 @@ class _RotateTrailingGatePattern(RewritePattern):
         if not all(len(group) == 1 for group in trailing.qubit_operand_groups):
             return
 
-        # The copies placed outside the loop use the same values, so every operand has to be
-        # defined outside the body. A value produced inside it, or carried by the loop as a block
-        # argument, does not exist at the points where the copies go.
+        # The copies go before and after the loop, where the body's own block arguments do not
+        # exist. A block argument stands for a qubit threaded through the loop, so at that index the
+        # same qubit is the iter arg feeding the loop (before) and the result leaving it (after);
+        # RepeatOp keeps those in positional correspondence. Following the index lets the copies
+        # name the qubit at each point.
+        #
+        # A value produced inside the body, on the other hand, exists nowhere outside it, so a gate
+        # touching one cannot be lifted out at all.
         defined_inside = set(op.body.walk())
-        for operand in trailing.operands:
-            owner = operand.owner
-            if isinstance(owner, Block):
-                if owner is block:
-                    return
-            elif owner in defined_inside:
+        before_qubits: list[SSAValue] = []
+        after_qubits: list[SSAValue] = []
+        for operand in trailing.qubits:
+            if isinstance(operand, BlockArgument) and operand.owner is block:
+                before_qubits.append(op.iter_args[operand.index])
+                after_qubits.append(op.res[operand.index])
+            elif operand.owner in defined_inside:
                 return
+            else:
+                before_qubits.append(operand)
+                after_qubits.append(operand)
 
-        before = trailing.clone()
-        after = trailing.clone()
+        before = GateOp(trailing.gate, before_qubits)
+        after = GateOp(trailing.gate, after_qubits)
 
         trailing.detach()
         rewriter.insert_op(trailing, InsertPoint.at_start(block))
         rewriter.insert_op(before, InsertPoint.before(op))
         rewriter.insert_op(after, InsertPoint.after(op))
+
+        # The rotation changes which gates the circuit applies, so any flow information computed
+        # earlier and cached on the circuit no longer describes it. Drop it rather than let a later
+        # pass trust a stale copy; recomputing it is that pass's job.
+        circuit = qcore.HasCircuitAncestor.get_circuit_ancestor(op)
+        if circuit is not None and stab.ConcreteFlowArrayAttr.get(circuit) is not None:
+            del circuit.attributes[stab.ConcreteFlowArrayAttr.KEY]
+            rewriter.notify_op_modified(circuit)
 
 
 class RotateRepeatTrailingGates(ModulePass):

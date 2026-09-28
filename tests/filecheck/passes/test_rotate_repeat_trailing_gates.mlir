@@ -4,7 +4,10 @@ builtin.module {
 // CHECK:       builtin.module {
     %qa = qcore.alloc_qubit -> !qcore.qubit
 // CHECK-NEXT:      %qa = qcore.alloc_qubit -> !qcore.qubit
-    %oa = qstruct.circuit(%qa : !qcore.qubit) -> !qcore.qubit {
+// The circuit carries flow information cached in its attr-dict. The rotation
+// changes the gates applied, so the pass must drop it: the CHECK for the circuit
+// header below expects no `stab.flows`, which only holds if it was invalidated.
+    %oa = qstruct.circuit(%qa : !qcore.qubit) {stab.flows = #stab.concrete_flow_array<[<+:>{I -> X0 : 1}]>} -> !qcore.qubit {
     ^bb0(%q : !qcore.qubit):
 // CHECK-NEXT:      %oa = qstruct.circuit(%qa : !qcore.qubit) -> !qcore.qubit {
 // CHECK-NEXT:      ^bb0(%q: !qcore.qubit):
@@ -46,20 +49,23 @@ builtin.module {
 // CHECK-NEXT:              qstruct.yield
 // CHECK-NEXT:          }
 
-// Not rotated: the gate acts on a block argument of the loop, so the copies
-// that would go before and after it have nothing to refer to.
+// Rotated across the loop boundary: the gate acts on %qi, a block argument, so
+// the copy before the loop uses the iter arg %q feeding it and the copy after
+// uses the result %r leaving it. All three name the same threaded qubit.
         %r = qstruct.repeat<3> (%q : !qcore.qubit) -> !qcore.qubit {
         ^bb1(%qi : !qcore.qubit):
             qref.reset<Z> (%qi)
             qref.gate<#qcore.gate.h> (%qi)
             qstruct.yield %qi : !qcore.qubit
         }
+// CHECK-NEXT:          qref.gate<#qcore.gate.h> (%q)
 // CHECK-NEXT:          %r = qstruct.repeat<3> (%q : !qcore.qubit) -> !qcore.qubit {
 // CHECK-NEXT:          ^bb1(%qi: !qcore.qubit):
-// CHECK-NEXT:              qref.reset<Z> (%qi)
 // CHECK-NEXT:              qref.gate<#qcore.gate.h> (%qi)
+// CHECK-NEXT:              qref.reset<Z> (%qi)
 // CHECK-NEXT:              qstruct.yield %qi : !qcore.qubit
 // CHECK-NEXT:          }
+// CHECK-NEXT:          qref.gate<#qcore.gate.h> (%r)
 
         qstruct.yield %q : !qcore.qubit
     }
